@@ -2,9 +2,10 @@ import React, { useState, useRef } from 'react';
 import { useAppStore } from '../store';
 import { toast } from 'sonner';
 import { api } from '../services/api';
-import { Eye, EyeOff, Fingerprint, Camera, Loader2 } from 'lucide-react';
+import { Eye, EyeOff, Fingerprint, Camera, Loader2, QrCode } from 'lucide-react';
 import BiometricScanner from './BiometricScanner';
 import { cn } from '../lib/utils';
+import { addBiometricLinkedUser, removeBiometricLinkedUser } from '../lib/biometricUtils';
 
 function PasswordInput({ value, onChange, placeholder, className }: any) {
   const [show, setShow] = useState(false);
@@ -100,6 +101,7 @@ export default function ProfileModal({ close }: any) {
   const [hasFace, setHasFace] = useState(false);
   const [activeScanType, setActiveScanType] = useState<'finger' | 'face'>('finger');
   const [loadingStatus, setLoadingStatus] = useState(true);
+  const [showQrToken, setShowQrToken] = useState(false);
 
   React.useEffect(() => {
     const checkUserBiometrics = async () => {
@@ -120,11 +122,11 @@ export default function ProfileModal({ close }: any) {
               credId: res.user.credId,
               faceImage: res.user.hasFaceImage ? "registered" : undefined
             };
-            localStorage.setItem('biometric_linked_user', JSON.stringify(bioPayload));
+            addBiometricLinkedUser(bioPayload);
           } else {
             setHasFingerprint(false);
             setHasFace(false);
-            localStorage.removeItem('biometric_linked_user');
+            removeBiometricLinkedUser(store.user.username);
           }
         }
       } catch (err) {
@@ -166,9 +168,9 @@ export default function ProfileModal({ close }: any) {
             const parsed = JSON.parse(stored);
             delete parsed.credId;
             if (!parsed.credId && !parsed.faceImage) {
-              localStorage.removeItem('biometric_linked_user');
+              removeBiometricLinkedUser(store.user?.username || '');
             } else {
-              localStorage.setItem('biometric_linked_user', JSON.stringify(parsed));
+              addBiometricLinkedUser(parsed);
             }
           } catch (e) {}
         }
@@ -204,9 +206,9 @@ export default function ProfileModal({ close }: any) {
             const parsed = JSON.parse(stored);
             delete parsed.faceImage;
             if (!parsed.credId && !parsed.faceImage) {
-              localStorage.removeItem('biometric_linked_user');
+              removeBiometricLinkedUser(store.user?.username || '');
             } else {
-              localStorage.setItem('biometric_linked_user', JSON.stringify(parsed));
+              addBiometricLinkedUser(parsed);
             }
           } catch (e) {}
         }
@@ -274,7 +276,7 @@ export default function ProfileModal({ close }: any) {
           credId: activeScanType === 'finger' ? credId : localObj.credId,
           faceImage: activeScanType === 'face' ? (faceImage ? "registered" : undefined) : localObj.faceImage
         };
-        localStorage.setItem('biometric_linked_user', JSON.stringify(localObj));
+        addBiometricLinkedUser(localObj);
         
         setShowScanner(false);
         toast.success(`${activeScanType === 'finger' ? 'Fingerprint' : 'Face ID'} signature synchronized successfully on the node database!`);
@@ -489,6 +491,7 @@ export default function ProfileModal({ close }: any) {
                         <button
                            type="button"
                            onClick={() => handleToggleBiometrics('face')}
+
                            className={cn(
                               "text-[9px] font-bold uppercase tracking-wider px-2.5 py-1.5 rounded-lg border cursor-pointer select-none transition-all active:scale-95",
                               hasFace
@@ -499,6 +502,61 @@ export default function ProfileModal({ close }: any) {
                            {hasFace ? "Revoke Face ID" : "Link Face ID"}
                         </button>
                      </div>
+
+                      <div className="border-t border-[#30363d]/30 pt-3 flex flex-col gap-3">
+                        <div className="flex items-center justify-between">
+                           <div className="flex items-center gap-2">
+                              <QrCode className={cn("w-4 h-4", showQrToken ? "text-[#58a6ff]" : "text-[#8b949e]")} />
+                              <div className="flex flex-col">
+                                 <span className="text-xs font-semibold text-[#e6edf3]">Personal QR Code</span>
+                                 <span className="text-[9px] text-[#8b949e]">Scan on other nodes to login</span>
+                              </div>
+                           </div>
+                           <button
+                              type="button"
+                              onClick={() => setShowQrToken(prev => !prev)}
+                              className="text-[9px] font-bold uppercase tracking-wider px-2.5 py-1.5 rounded-lg border bg-[#388bfd]/10 border-[#388bfd]/30 text-[#388bfd] hover:bg-[#388bfd]/20 cursor-pointer select-none transition-all active:scale-95"
+                           >
+                              {showQrToken ? "Hide Key" : "View QR Key"}
+                           </button>
+                        </div>
+                        
+                        {showQrToken && (
+                          <div className="flex flex-col items-center p-3 bg-black/60 rounded-xl border border-[#30363d]/50">
+                            <span className="text-[8px] font-mono text-[#8b949e] uppercase tracking-widest mb-1.5">SECURE PORTABLE QR PASSPORT</span>
+                            <img
+                              src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&color=58a6ff&bgcolor=0d1117&data=${encodeURIComponent(JSON.stringify({
+                                type: 'auth_qr',
+                                id: store.user?.id,
+                                username: store.user?.username,
+                                token: store.user?.token,
+                                email: store.user?.email,
+                                fullname: store.user?.fullname,
+                                avatarUrl: store.user?.avatarUrl
+                              }))}`}
+                              alt="Secure Login QR Code"
+                              className="w-36 h-36 border border-[#30363d] rounded-lg p-1.5 bg-[#0d1117]"
+                              referrerPolicy="no-referrer"
+                            />
+                            <a
+                              href={`https://api.qrserver.com/v1/create-qr-code/?size=300x300&color=58a6ff&bgcolor=0d1117&data=${encodeURIComponent(JSON.stringify({
+                                type: 'auth_qr',
+                                id: store.user?.id,
+                                username: store.user?.username,
+                                token: store.user?.token,
+                                email: store.user?.email,
+                                fullname: store.user?.fullname,
+                                avatarUrl: store.user?.avatarUrl
+                              }))}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-[8px] font-bold text-[#388bfd] hover:underline uppercase tracking-wide mt-2"
+                            >
+                              Open Fullscreen QR
+                            </a>
+                          </div>
+                        )}
+                      </div>
 
                      {showScanner && (
                         <BiometricScanner 

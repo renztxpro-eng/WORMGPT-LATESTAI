@@ -129,6 +129,7 @@ export default function BiometricScanner({ mode, username, userData, defaultScan
   const [stream, setStream] = useState<MediaStream | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [cameraActive, setCameraActive] = useState<boolean>(false);
+  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
 
   // Auto Scroll Logger Ref
   const logsContainerRef = useRef<HTMLDivElement>(null);
@@ -190,12 +191,12 @@ export default function BiometricScanner({ mode, username, userData, defaultScan
     let activeStream: MediaStream | null = null;
     
     if (scanType === 'face') {
-      setLogs(prev => [...prev, '[SYS] REQUESTING NATIVE MULTIMEDIA GATEWAY ACCESS...']);
+      setLogs(prev => [...prev, `[SYS] REQUESTING ${facingMode === 'user' ? 'FRONT' : 'BACK'} CAMERA MULTIMEDIA ACCESS...`]);
       navigator.mediaDevices.getUserMedia({ 
         video: { 
           width: { ideal: 400 }, 
           height: { ideal: 400 },
-          facingMode: "user"
+          facingMode: facingMode
         } 
       })
       .then(s => {
@@ -204,7 +205,7 @@ export default function BiometricScanner({ mode, username, userData, defaultScan
         setCameraActive(true);
         setLogs(prev => [
           ...prev, 
-          '[OK] CAMERA HARDWARE STREAM LOCK: ESTABLISHED.', 
+          `[OK] ${facingMode === 'user' ? 'FRONT' : 'BACK'} CAMERA STREAM LOCK: ESTABLISHED.`, 
           '[SYS] AI SPATIAL TRACKING INTERFACE SYNCHRONIZED.'
         ]);
       })
@@ -227,7 +228,7 @@ export default function BiometricScanner({ mode, username, userData, defaultScan
         activeStream.getTracks().forEach(track => track.stop());
       }
     };
-  }, [scanType]);
+  }, [scanType, facingMode]);
 
   // Bind stream to video element when stream or video ref/mount state changes
   useEffect(() => {
@@ -635,10 +636,23 @@ export default function BiometricScanner({ mode, username, userData, defaultScan
                 playsInline
                 muted
                 className={cn(
-                  "w-full h-full object-cover scale-x-[-1] rounded-full border-2 border-[#388bfd]/30 shadow-lg",
+                  "w-full h-full object-cover rounded-full border-2 border-[#388bfd]/30 shadow-lg",
+                  facingMode === 'user' ? "scale-x-[-1]" : "",
                   cameraActive ? "block" : "hidden"
                 )}
               />
+              
+              {/* Cam toggle switch button */}
+              {cameraActive && (
+                <button
+                  type="button"
+                  onClick={() => setFacingMode(prev => prev === 'user' ? 'environment' : 'user')}
+                  className="absolute bottom-3 right-3 p-2 bg-[#0d1117] hover:bg-[#161b22] text-[#388bfd] hover:text-[#58a6ff] border border-[#30363d] rounded-full transition-all z-20 cursor-pointer shadow-lg active:scale-95 flex items-center justify-center"
+                  title="Switch Camera (Front/Back)"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                </button>
+              )}
               {!cameraActive && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#07090f] text-[#388bfd]">
                   {/* Cyber wireframe face mesh generator */}

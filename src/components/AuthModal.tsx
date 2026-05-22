@@ -1,9 +1,11 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useAppStore } from '../store';
 import { api } from '../services/api';
 import { toast } from 'sonner';
-import { Eye, EyeOff, Image as ImageIcon, Loader2, Fingerprint } from 'lucide-react';
+import { Eye, EyeOff, Image as ImageIcon, Loader2, Fingerprint, QrCode, Trash2, Camera, UserPlus, RefreshCw } from 'lucide-react';
 import BiometricScanner from './BiometricScanner';
+import { getBiometricLinkedUsers, removeBiometricLinkedUser, addBiometricLinkedUser } from '../lib/biometricUtils';
+import jsQR from 'jsqr';
 
 function PasswordInput({ value, onChange, placeholder, className, disabled }: any) {
   const [show, setShow] = useState(false);
@@ -97,27 +99,33 @@ export default function AuthModal({ mode, setMode, close }: any) {
   const [scannedBioUser, setScannedBioUser] = useState<any>(null);
   const [cachedBioUser, setCachedBioUser] = useState<any>(null);
 
-  const handleBiometricLogin = async () => {
-    const stored = localStorage.getItem('biometric_linked_user');
-    if (stored) {
-      try {
-        const userObj = JSON.parse(stored);
-        if (userObj && userObj.username) {
-          const checkRes = await api.checkBiometrics(userObj.username);
-          if (checkRes.success && checkRes.registered) {
-            setScannedBioUser(checkRes.user);
-            setCachedBioUser(checkRes.user);
-            return;
-          }
-        }
-      } catch (err) {
-        console.warn("Cached local biometric check error, fallback to prompt", err);
-      }
+  // Enrolled Biometric Accounts State
+  const [enrolledUsers, setEnrolledUsers] = useState<any[]>([]);
+
+  // QR Login State
+  const [showQrScanner, setShowQrScanner] = useState(false);
+  const qrVideoRef = useRef<HTMLVideoElement>(null);
+  const qrCanvasRef = useRef<HTMLCanvasElement>(null);
+  const qrScanLoopRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const list = getBiometricLinkedUsers();
+    setEnrolledUsers(list);
+    if (list.length > 0) {
+      setCachedBioUser(list[0]);
     }
-    // Fallback if no local signature found: let them search on the centralized Node database
-    setBioSearchLogin('');
-    setBioInputMode(true);
-    setCachedBioUser(null);
+  }, []);
+
+  const handleBiometricLogin = async () => {
+    const list = getBiometricLinkedUsers();
+    setEnrolledUsers(list);
+    if (list.length > 0) {
+      setCachedBioUser(list[0]);
+    } else {
+      setBioSearchLogin('');
+      setBioInputMode(true);
+      setCachedBioUser(null);
+    }
   };
 
   const handleVerifyNodeBiometrics = async () => {
@@ -143,6 +151,202 @@ export default function AuthModal({ mode, setMode, close }: any) {
       toast.dismiss(checkToast);
       toast.error("Endpoint connect signature mismatch.");
     }
+  };
+
+  // QR CODE DECRYPTION & SECURE ACCESS GATEWAY EFFECT
+  useEffect(() => {
+    let activeStream: MediaStream | null = null;
+    if (showQrScanner) {
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+        .then((s) => {
+          activeStream = s;
+          setQrStream(s);
+          if (qrVideoRef.current) {
+            qrVideoRef.current.srcObject = s;
+            qrVideoRef.current.setAttribute('playsinline', 'true');
+            qrVideoRef.current.play().then(() => {
+              const scan = () => {
+                if (qrVideoRef.current && qrCanvasRef.current) {
+                  const video = qrVideoRef.current;
+                  const canvas = qrCanvasRef.current;
+                  const ctx = canvas.getContext('2d');
+                  if (ctx && video.readyState === video.HAVE_ENOUGH_DATA) {
+                    canvas.width = 300;
+                    canvas.height = 300;
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                    try {
+                      const code = jsQR(imgData.data, imgData.width, imgData.height, {
+                        inversionAttempts: "dontInvert",
+                      });
+                      if (code && code.data) {
+                        handleQrCodeScanned(code.data);
+                        return;
+                      }
+                    } catch (err) {
+                      console.error("QR processing frames error:", err);
+                    }
+                  }
+                }
+                qrScanLoopRef.current = requestAnimationFrame(scan);
+              };
+              qrScanLoopRef.current = requestAnimationFrame(scan);
+            });
+          }
+        })
+        .catch((err) => {
+          toast.error("Multimedia camera gateway blocked or inaccessible.");
+          setShowQrScanner(false);
+        });
+    } else {
+      setQrStream(null);
+      if (qrScanLoopRef.current) {
+        cancelAnimationFrame(qrScanLoopRef.current);
+        qrScanLoopRef.current = null;
+      }
+    }
+
+    return () => {
+      if (activeStream) {
+        activeStream.getTracks().forEach((track) => track.stop());
+      }
+      if (qrScanLoopRef.current) {
+        cancelAnimationFrame(qrScanLoopRef.current);
+      }
+    };
+  }, [showQrScanner]);
+
+  const [qrStream, setQrStream] = useState<MediaStream | null>(null);
+
+  const handleQrCodeScanned = (decodedString: string) => {
+    try {
+      const parsed = JSON.parse(decodedString);
+      if (parsed.type === 'auth_qr' && parsed.username && parsed.token) {
+        toast.dismiss();
+        toast.success(`Identity decrypted: Welcome back ${parsed.username.toUpperCase()}!`);
+        
+        // Push user authentication variables to store
+        store.login({
+          id: String(parsed.id || ''),
+          token: parsed.token,
+          username: parsed.username,
+          email: parsed.email || '',
+          fullname: parsed.fullname || '',
+          avatarUrl: parsed.avatarUrl || ''
+        });
+
+        // Track and enroll this identity inside the local device biometrics accounts list
+        addBiometricLinkedUser({
+          id: String(parsed.id || ''),
+          username: parsed.username,
+          email: parsed.email || '',
+          fullname: parsed.fullname || '',
+          avatarUrl: parsed.avatarUrl || '',
+          credId: parsed.credId,
+          faceImage: parsed.faceImage
+        });
+
+        // Close scanner
+        setShowQrScanner(false);
+        close();
+      } else if (parsed.type === 'password_qr' && parsed.login && parsed.password) {
+        toast.dismiss();
+        toast.success("Credential QR decrypted!");
+        setLoginForm({ login: parsed.login, password: parsed.password });
+        setShowQrScanner(false);
+        
+        setIsLoggingIn(true);
+        const lToast = toast.loading("Verifying QR decrypted secrets...");
+        api.login(parsed.login, parsed.password).then(res => {
+          if (res.success) {
+            store.login({
+              id: String(res.user_id),
+              token: res.token,
+              username: res.username,
+              email: res.email,
+              fullname: res.fullname || '',
+              avatarUrl: res.avatar_url || ''
+            });
+            toast.dismiss(lToast);
+            toast.success("Logged in successfully!");
+            close();
+          } else {
+            toast.dismiss(lToast);
+            toast.error(res.message || "Invalid credentials inside QR.");
+          }
+        }).catch(() => {
+          toast.dismiss(lToast);
+          toast.error("Uplink terminal communication offline.");
+        }).finally(() => {
+          setIsLoggingIn(false);
+        });
+      } else {
+        toast.error("Invalid QR structure format.");
+      }
+    } catch (e) {
+      toast.error("Scanning failed: Unrecognized passport signature.");
+    }
+  };
+
+  const handleQrFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        // Optimize scanner image size for jsQR by downscaling large screenshot files
+        const maxDim = 800;
+        let width = img.width;
+        let height = img.height;
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, width, height);
+          const imgData = ctx.getImageData(0, 0, width, height);
+          
+          // Try standard non-inverted and inverted attempts (essential for dark theme screenshots)
+          let code = jsQR(imgData.data, imgData.width, imgData.height, {
+            inversionAttempts: "attemptBoth"
+          });
+
+          // Fallback to original resolution with 'attemptBoth' if downscaling missed it
+          if (!code && (img.width !== width || img.height !== height)) {
+            const canvasOrig = document.createElement('canvas');
+            canvasOrig.width = img.width;
+            canvasOrig.height = img.height;
+            const ctxOrig = canvasOrig.getContext('2d');
+            if (ctxOrig) {
+              ctxOrig.drawImage(img, 0, 0);
+              const imgDataOrig = ctxOrig.getImageData(0, 0, img.width, img.height);
+              code = jsQR(imgDataOrig.data, imgDataOrig.width, imgDataOrig.height, {
+                inversionAttempts: "attemptBoth"
+              });
+            }
+          }
+
+          if (code && code.data) {
+            handleQrCodeScanned(code.data);
+          } else {
+            toast.error("Decoupling failed: No QR cipher matrix found.");
+          }
+        }
+      };
+      img.src = event.target?.result as string;
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleBiometricLoginSuccess = async (userData: any, selectedKeyIndex?: number, devicePin?: string, assertionId?: string, faceImage?: string, localScore?: number) => {
@@ -366,70 +570,51 @@ export default function AuthModal({ mode, setMode, close }: any) {
         <div className="overflow-y-auto p-6 flex flex-col pt-8">
           {mode === 'login' && (
             <>
-              {cachedBioUser ? (
-                <>
-                  <h2 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-[#8957e5] to-[#d3bcf6] mb-2 text-center uppercase tracking-wider font-mono">
-                    Biometric Gateway
+              {showQrScanner ? (
+                <div className="flex flex-col items-center">
+                  <h2 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-[#388bfd] to-[#58a6ff] mb-2 text-center font-mono uppercase tracking-widest flex items-center gap-2">
+                    <QrCode className="w-5 h-5 animate-pulse text-[#388bfd]" />
+                    <span>QR PASSPORT DECRYPTOR</span>
                   </h2>
-                  <p className="text-xs text-[#8b949e] mb-6 text-center leading-relaxed">
-                    Found secure biometric locks linked on this device.
+                  <p className="text-xs text-[#8b949e] mb-5 text-center px-4 leading-relaxed">
+                    Position your personal security QR Passport inside the scanner grid or drag & drop a credentials image file.
                   </p>
 
-                  <div className="flex flex-col items-center mb-6 bg-[#161b22] border border-[#30363d] p-4 rounded-xl">
-                    <img 
-                      src={cachedBioUser.avatarUrl || "https://my-angge.x10.mx/uploads/blue.jpg"} 
-                      alt="Cached User Avatar" 
-                      className="w-12 h-12 rounded-full object-cover border border-[#388bfd]/30 mb-2"
-                    />
-                    <div className="text-xs font-bold text-[#e6edf3] font-mono">
-                      {cachedBioUser.username.toUpperCase()}
-                    </div>
-                    <div className="text-[10px] text-[#8b949e] mt-1 flex flex-wrap gap-1 justify-center">
-                      {cachedBioUser.credId && (
-                        <span className="px-1.5 py-0.5 bg-[#8957e5]/10 border border-[#8957e5]/20 text-[8px] text-[#8957e5] font-bold rounded-full uppercase">Fingerprint</span>
-                      )}
-                      {cachedBioUser.hasFaceImage && (
-                        <span className="px-1.5 py-0.5 bg-[#388bfd]/10 border border-[#388bfd]/20 text-[8px] text-[#388bfd] font-bold rounded-full uppercase">Face ID</span>
-                      )}
-                    </div>
+                  <div className="relative w-60 h-60 border-2 border-[#388bfd]/30 bg-[#07090f] rounded-xl flex items-center justify-center mb-5 overflow-hidden shadow-2xl group">
+                    <div className="absolute top-2 left-2 w-3 h-3 border-t-2 border-l-2 border-[#388bfd]" />
+                    <div className="absolute top-2 right-2 w-3 h-3 border-t-2 border-r-2 border-[#388bfd]" />
+                    <div className="absolute bottom-2 left-2 w-3 h-3 border-b-2 border-l-2 border-[#388bfd]" />
+                    <div className="absolute bottom-2 right-2 w-3 h-3 border-b-2 border-r-2 border-[#388bfd]" />
+                    
+                    {/* Pulsing visual scanline */}
+                    <div className="absolute inset-x-0 h-0.5 bg-[#388bfd] top-0 animate-pulse shadow-[0_0_8px_#388bfd] z-10" />
+
+                    <canvas ref={qrCanvasRef} className="absolute inset-0 w-full h-full object-cover rounded-xl" />
+                    <video ref={qrVideoRef} className="hidden" />
+                  </div>
+
+                  <div className="w-full flex flex-col items-center gap-2 mb-4">
+                    <label className="text-[10px] font-bold text-[#8b949e] uppercase tracking-widest">Or select from device files</label>
+                    <label className="flex items-center gap-2 text-xs font-bold text-[#388bfd] hover:text-[#58a6ff] cursor-pointer bg-[#388bfd]/10 hover:bg-[#388bfd]/20 border border-[#388bfd]/30 px-4 py-2.5 rounded-lg transition-all active:scale-95">
+                      <ImageIcon className="w-4 h-4" />
+                      <span>UPLOAD QR PASSPORT JPG</span>
+                      <input 
+                        type="file" 
+                        accept="image/*" 
+                        className="hidden" 
+                        onChange={handleQrFileSelected} 
+                      />
+                    </label>
                   </div>
 
                   <button 
                     type="button"
-                    onClick={() => {
-                      setScannedBioUser(cachedBioUser);
-                      setShowBioScanner(true);
-                    }}
-                    className="w-full bg-[#8957e5] text-white rounded-lg py-3 font-bold text-sm mb-3 hover:bg-[#8957e5]/90 transition shadow-lg shadow-[#8957e5]/20 flex items-center justify-center gap-2 cursor-pointer border-0 font-mono tracking-wider animate-pulse"
+                    onClick={() => setShowQrScanner(false)}
+                    className="w-full bg-transparent border border-[#30363d] text-[#8b949e] hover:text-white rounded-lg py-3 font-bold text-sm transition cursor-pointer"
                   >
-                    <Fingerprint className="w-4 h-4 animate-pulse" />
-                    <span>VERIFY BIOMETRICS</span>
+                    Return to Login
                   </button>
-
-                  <button 
-                    type="button"
-                    onClick={() => {
-                      setCachedBioUser(null);
-                      setScannedBioUser(null);
-                      setBioSearchLogin('');
-                      setBioInputMode(false);
-                    }}
-                    className="w-full bg-transparent border border-[#388bfd]/30 text-[#388bfd] hover:bg-[#388bfd]/10 rounded-lg py-3 font-bold text-sm mb-3 transition cursor-pointer font-mono text-xs text-center border-0"
-                  >
-                    SWITCH ACCOUNT
-                  </button>
-
-                  <button 
-                    type="button"
-                    onClick={() => {
-                      setCachedBioUser(null);
-                      setBioInputMode(false);
-                    }}
-                    className="w-full bg-transparent border border-[#30363d] text-[#8b949e] hover:text-white rounded-lg py-2 font-bold text-sm mb-1 transition cursor-pointer text-xs"
-                  >
-                    Cancel
-                  </button>
-                </>
+                </div>
               ) : bioInputMode ? (
                 <>
                   <h2 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-[#8957e5] to-[#d3bcf6] mb-2 text-center uppercase tracking-wider font-mono">
@@ -457,12 +642,134 @@ export default function AuthModal({ mode, setMode, close }: any) {
 
                   <button 
                     type="button"
-                    onClick={() => setBioInputMode(false)}
+                    onClick={() => {
+                      setBioInputMode(false);
+                      setEnrolledUsers(getBiometricLinkedUsers());
+                    }}
                     className="w-full bg-transparent border border-[#30363d] text-[#8b949e] hover:text-white rounded-lg py-3 font-bold text-sm mb-3 transition cursor-pointer"
                   >
                     Cancel
                   </button>
                 </>
+              ) : (cachedBioUser || enrolledUsers.length > 0) ? (
+                <div className="flex flex-col">
+                  <h2 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-[#8957e5] to-[#d3bcf6] mb-2 text-center uppercase tracking-wider font-mono flex items-center justify-center gap-2">
+                    <Fingerprint className="w-5 h-5 text-[#8957e5]" />
+                    <span>BIOMETRIC MATRIX LOCK</span>
+                  </h2>
+                  <p className="text-xs text-[#8b949e] mb-6 text-center leading-relaxed">
+                    Select an enrolled profile terminal to activate local sensor scans and authenticate node gateway credentials.
+                  </p>
+
+                  <div className="space-y-2.5 max-h-52 overflow-y-auto pr-1 mb-5 scrollbar-thin">
+                    {enrolledUsers.map((user: any) => (
+                      <div 
+                        key={user.username}
+                        className="flex items-center justify-between p-3 bg-[#161b22] border border-[#30363d] hover:border-[#8957e5]/50 rounded-xl transition duration-150 group"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setScannedBioUser(user);
+                            setShowBioScanner(true);
+                          }}
+                          className="flex-1 flex items-center gap-3 bg-transparent border-0 text-left cursor-pointer p-0 select-none text-inherit focus:outline-none"
+                        >
+                          <div className="relative">
+                            <img 
+                              src={user.avatarUrl || "https://my-angge.x10.mx/uploads/blue.jpg"} 
+                              alt={user.username} 
+                              className="w-10 h-10 rounded-full object-cover border border-[#30363d]/50" 
+                            />
+                            <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-[#238636] border-2 border-[#161b22] rounded-full animate-pulse" />
+                          </div>
+                          <div className="flex flex-col">
+                            <span className="text-xs font-bold text-[#e6edf3] group-hover:text-[#8957e5] transition duration-100">{user.fullname || user.username}</span>
+                            <span className="text-[10px] text-[#8b949e] font-mono">@{user.username}</span>
+                          </div>
+                        </button>
+                        
+                        <div className="flex items-center gap-2">
+                          {user.faceImage && (
+                            <span title="Face Signature Enrolled">
+                              <Camera className="w-3.5 h-3.5 text-[#388bfd]" />
+                            </span>
+                          )}
+                          {user.credId && (
+                            <span title="TouchID Template Configured">
+                              <Fingerprint className="w-3.5 h-3.5 text-[#8957e5]" />
+                            </span>
+                          )}
+                          
+                          <button
+                            type="button"
+                            onClick={() => {
+                              removeBiometricLinkedUser(user.username);
+                              const updated = getBiometricLinkedUsers();
+                              setEnrolledUsers(updated);
+                              if (updated.length === 0) {
+                                setCachedBioUser(null);
+                                setBioInputMode(true);
+                              } else {
+                                if (cachedBioUser?.username === user.username) {
+                                  setCachedBioUser(updated[0]);
+                                }
+                              }
+                              toast.success(`Identity profile cache deleted for @${user.username}.`);
+                            }}
+                            className="p-1.5 text-[#8b949e] hover:text-[#f85149] hover:bg-[#f85149]/10 rounded-lg transition"
+                            title="Remove registration cache"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        const targetUser = cachedBioUser || enrolledUsers[0];
+                        if (targetUser) {
+                          setScannedBioUser(targetUser);
+                          setShowBioScanner(true);
+                        } else {
+                          toast.error("No identity linked to activate sensors.");
+                        }
+                      }}
+                      className="w-full bg-[#8957e5] text-white rounded-lg py-3 font-bold text-sm hover:bg-[#8957e5]/90 transition shadow-lg shadow-[#8957e5]/20 flex items-center justify-center gap-2 cursor-pointer border-0 font-mono tracking-wider animate-pulse"
+                    >
+                      <Fingerprint className="w-4 h-4 animate-pulse" />
+                      <span>ACTIVATE DEVICE SENSORS</span>
+                    </button>
+
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        setBioSearchLogin('');
+                        setBioInputMode(true);
+                      }}
+                      className="w-full bg-transparent border border-[#30363d] text-[#8b949e] hover:text-white rounded-lg py-2.5 font-bold text-xs transition cursor-pointer flex items-center justify-center gap-1.5 hover:border-[#8957e5]/60 hover:text-[#8957e5]"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" />
+                      <span>LINK ADDITIONAL IDENTITY</span>
+                    </button>
+
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        setCachedBioUser(null);
+                        setBioInputMode(false);
+                        setEnrolledUsers([]);
+                      }}
+                      className="w-full bg-transparent text-[#8b949e] hover:text-white rounded-lg py-2 font-bold text-xs transition cursor-pointer"
+                    >
+                      Return to Password Sign In
+                    </button>
+                  </div>
+                </div>
               ) : (
                 <>
                   <h2 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-[#e6edf3] to-[#8b949e] mb-6 text-center">Sign In</h2>
@@ -496,15 +803,38 @@ export default function AuthModal({ mode, setMode, close }: any) {
                       <span>Sign In</span>
                     )}
                   </button>
-                  <button
-                    type="button"
-                    disabled={isLoggingIn}
-                    onClick={handleBiometricLogin}
-                    className="w-full bg-[#8957e5]/10 border border-[#8957e5]/30 text-[#8957e5] hover:text-[#d3bcf6] hover:border-[#8957e5] rounded-lg py-3 font-bold text-sm mb-3 transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-                  >
-                    <Fingerprint className="w-4 h-4 animate-pulse" />
-                    <span>Biometric Node Sign In</span>
-                  </button>
+                  
+                  <div className="grid grid-cols-2 gap-3 mb-3">
+                    <button
+                      type="button"
+                      disabled={isLoggingIn}
+                      onClick={() => {
+                        const list = getBiometricLinkedUsers();
+                        setEnrolledUsers(list);
+                        if (list.length > 0) {
+                          setCachedBioUser(list[0]);
+                        } else {
+                          setBioSearchLogin('');
+                          setBioInputMode(true);
+                        }
+                      }}
+                      className="bg-[#8957e5]/10 border border-[#8957e5]/30 text-[#8957e5] hover:text-[#d3bcf6] hover:border-[#8957e5] rounded-lg py-3 font-bold text-xs transition flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    >
+                      <Fingerprint className="w-3.5 h-3.5 animate-pulse" />
+                      <span>Biometric Node</span>
+                    </button>
+                    
+                    <button
+                      type="button"
+                      disabled={isLoggingIn}
+                      onClick={() => setShowQrScanner(true)}
+                      className="bg-[#388bfd]/10 border border-[#388bfd]/30 text-[#388bfd] hover:text-[#58a6ff] hover:border-[#388bfd] rounded-lg py-3 font-bold text-xs transition flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    >
+                      <QrCode className="w-3.5 h-3.5" />
+                      <span>QR Passport</span>
+                    </button>
+                  </div>
+
                   <button disabled={isLoggingIn} onClick={() => setMode('register')} className="w-full bg-transparent border border-[#8957E5]/50 text-[#8b949e] hover:text-[#e6edf3] hover:border-[#8957E5] rounded-lg py-3 font-bold text-sm mb-3 transition disabled:opacity-50 cursor-pointer">Create Account</button>
                 </>
               )}
